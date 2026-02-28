@@ -2,7 +2,7 @@ require('dotenv').config()
 const cors = require('cors')
 const express = require('express')
 const app = express()
-const port = 8080
+const port = process.env.PORT || 8080;
 const supabase = require('./services/supabase.js')
 const bcrypt = require("bcrypt");
 const validator = require("validator");
@@ -271,5 +271,5 @@ app.get("/project", async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+  console.log(`Server running on port ${port}`);
+});
