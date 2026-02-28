@@ -6,6 +6,10 @@ const port = 8080
 const supabase = require('./services/supabase.js')
 const bcrypt = require("bcrypt");
 const validator = require("validator");
+const BUCKETNAME = process.env.SUPABASE_BUCKET;
+const path = require('node:path');
+const multer = require("multer");
+const crypto = require('node:crypto');
 app.use(cors());
 app.use(express.json());
 
@@ -107,7 +111,6 @@ app.post("/login", async (req, res) =>{
     .eq("user_email", email)
     .single();
 
-    console.log(user);
     if(error || !user){
       return res.status(400).json({
         message: "Email or password are incorrect"
@@ -129,13 +132,143 @@ app.post("/login", async (req, res) =>{
       userName: user.user_name
     })
 
-    
-
   } catch (er){
     res.status(500).json({error: "Server error"})
   }
 })
 
+const upload = multer({
+  storage: multer.memoryStorage(), 
+  limits: { fileSize: 300 * 1024 * 1024 },     
+});
+
+function makeObjectPath(originalName) {
+  const ext = path.extname(originalName || "");
+  const id = crypto.randomBytes(16).toString("hex");
+  const yyyy = new Date().getFullYear();
+  return `${yyyy}/${id}-${safeName(path.basename(originalName, ext))}${ext}`;
+}
+
+function safeName(name = "file") {
+  return String(name).replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+app.post("/upload", upload.single('file'), async(req, res) =>{
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file. Field name must be "file".' });
+    }
+    const {name, description, year, period, category, notAllowed} = req.body;
+    const objectPath = makeObjectPath(req.file.originalname);
+    const notAllowedArr = notAllowed
+    ? notAllowed.trim().split(/[,\s]+/).filter(Boolean)
+    : [];
+    if (!name || !description || !year || !period || !category) {
+      return res.status(400).json({
+        message: "Some fields are empty"
+      });
+    }
+
+    const { data, error } = await supabase.storage
+      .from(BUCKETNAME)
+      .upload(objectPath, req.file.buffer, {
+        contentType: req.file.mimetype || "application/octet-stream",
+        upsert: false,
+      });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    
+    const { data: pub } = supabase.storage.from(BUCKETNAME).getPublicUrl(objectPath);
+
+    const {data: insertedFile, error: errorFiles } = await supabase
+      .from('UploadedFiles')
+      .insert([
+        {
+          url: pub.publicUrl,
+          name: name,
+          description: description,
+          year: year,
+          period: period,
+          category: category 
+        }
+      ])
+      .select()
+      .single();
+
+    if (errorFiles) {
+      return res.status(400).json(errorFiles);
+    }
+
+
+    for(let i = 0; i < notAllowedArr.length; i++){
+      const {error: errorNotAllowed} = await supabase
+      .from('notAvailableUsers')
+      .insert([
+        {
+          file_id: insertedFile.id,
+          user_name: notAllowedArr[i]
+        }
+      ])
+
+      if (errorNotAllowed) {
+        return res.status(400).json(errorNotAllowed);
+      }
+    }
+
+
+    //res.json({ message: "User created successfully" });
+    return res.status(201).json({
+      ok: true,
+      bucket: BUCKETNAME,
+      path: data.path,
+      publicUrl: pub?.publicUrl ?? null,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      originalName: req.file.originalname,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Upload failed" });
+  }
+})
+
+app.get("/project", async (req, res) => {
+  try {
+    const { user_name } = req.query;
+
+    if (!user_name) {
+      return res.status(400).json({ message: "User name required" });
+    }
+
+    const { data: restricted, error: err1 } = await supabase
+      .from("notAvailableUsers")
+      .select("file_id")
+      .eq("user_name", user_name);
+
+    if (err1) {
+      return res.status(500).json(err1);
+    }
+
+    const restrictedIds = restricted.map(r => r.file_id);
+
+    let query = supabase.from("UploadedFiles").select("*");
+
+    if (restrictedIds.length > 0) {
+      query = query.not("id", "in", `(${restrictedIds.join(",")})`);
+    }
+
+    const { data: files, error: err2 } = await query;
+
+    if (err2) {
+      return res.status(500).json(err2);
+    }
+
+    res.json(files);
+
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`)
